@@ -1,20 +1,9 @@
 import streamlit as st
-import json
 import time
 from datetime import datetime
-import boto3
-from botocore.config import Config
-import os
-from dotenv import load_dotenv
 from collections import deque, Counter
 import re
-import pandas as pd
 import numpy as np
-import warnings
-warnings.filterwarnings('ignore')
-
-# Load environment variables
-load_dotenv()
 
 # Global variables
 latest_signals = deque(maxlen=50)
@@ -23,17 +12,16 @@ bot_monitors = {}
 class LightweightPredictor:
     def __init__(self):
         self.pattern_history = []
-        self.window_size = 5
     
     def predict(self, signals):
-        """Lightweight prediction using pattern analysis only"""
+        """Lightweight prediction using pattern analysis"""
         if len(signals) < 3:
-            return {'color': 'Analyzing...', 'confidence': 'Low', 'probability': 0.5, 'method': 'Pattern Analysis'}
+            return {'color': 'Analyzing...', 'confidence': 'Low', 'probability': 0.5}
         
         recent_colors = [s.get('result_color') for s in signals[-5:] if s.get('result_color') in ['Green', 'Red']]
         
         if not recent_colors:
-            return {'color': 'Green', 'confidence': 'Low', 'probability': 0.5, 'method': 'Pattern Analysis'}
+            return {'color': 'Green', 'confidence': 'Low', 'probability': 0.5}
         
         # Count recent patterns
         green_count = recent_colors.count('Green')
@@ -41,9 +29,8 @@ class LightweightPredictor:
         total_known = green_count + red_count
         
         if total_known == 0:
-            return {'color': 'Green', 'confidence': 'Low', 'probability': 0.5, 'method': 'Pattern Analysis'}
+            return {'color': 'Green', 'confidence': 'Low', 'probability': 0.5}
         
-        # Simple pattern analysis
         green_probability = green_count / total_known
         
         # Pattern 1: If last 2 are same, predict opposite
@@ -61,7 +48,6 @@ class LightweightPredictor:
             confidence = 'Medium'
             probability = 1 - green_probability
         else:
-            # Random with slight bias toward recent trend
             predicted_color = 'Green' if green_probability >= 0.5 else 'Red'
             confidence = 'Low'
             probability = 0.55
@@ -69,8 +55,7 @@ class LightweightPredictor:
         return {
             'color': predicted_color,
             'confidence': confidence,
-            'probability': probability,
-            'method': 'Pattern Analysis'
+            'probability': probability
         }
 
 class SignalProcessor:
@@ -83,7 +68,6 @@ class SignalProcessor:
         self.loss_streak = 0
         self.current_phase = 1
         self.recommended_multipliers = [1.0, 2.5, 6.25, 15.63, 39.08, 97.62, 244.05, 610.12, 1525.3, 3813.25, 9533.12, 23832.8]
-        self.load_existing_data()
     
     def parse_telegram_signal(self, message):
         """Parse signals from Telegram channel format"""
@@ -99,8 +83,7 @@ class SignalProcessor:
                 'trade_color': None,
                 'quantity': 1.0,
                 'phase': self.current_phase,
-                'bot_name': self.bot_name,
-                'source': 'telegram'
+                'bot_name': self.bot_name
             }
             
             # Extract period ID
@@ -110,7 +93,7 @@ class SignalProcessor:
             if period_match:
                 signal_data['period_id'] = period_match.group(1)
             else:
-                st.error("❌ Could not find Period ID in signal")
+                st.error("❌ Could not find Period ID")
                 return None
             
             # Extract result (Win/Lose)
@@ -128,19 +111,19 @@ class SignalProcessor:
                 if self.loss_streak < len(self.recommended_multipliers):
                     self.current_phase = self.loss_streak + 1
             else:
-                st.warning("⚠️ Could not determine Win/Lose result")
+                st.warning("⚠️ Could not determine Win/Lose")
                 return None
             
-            # Extract trade color recommendation
+            # Extract trade color
             if 'Trade: 🟢' in message or 'Trade: Green' in message or 'Trade:🟢' in message or '🟢✔️' in message:
                 signal_data['trade_color'] = 'Green'
             elif 'Trade: 🔴' in message or 'Trade: Red' in message or 'Trade:🔴' in message or '🔴✔️' in message:
                 signal_data['trade_color'] = 'Red'
             else:
-                st.warning("⚠️ Could not find trade color recommendation")
+                st.warning("⚠️ Could not find trade color")
                 return None
             
-            # Extract recommended quantity
+            # Extract quantity
             quantity_match = re.search(r'quantity: x?([\d.]+)', message, re.IGNORECASE)
             if quantity_match:
                 try:
@@ -155,24 +138,13 @@ class SignalProcessor:
             return signal_data
             
         except Exception as e:
-            st.error(f"❌ Error parsing signal: {e}")
+            st.error(f"❌ Error: {e}")
             return None
     
     def get_actual_result_color(self):
-        """Generate realistic color results based on patterns"""
+        """Generate realistic color results"""
         colors = ['Green', 'Red']
-        weights = [0.48, 0.48]  # Slight bias based on recent history
-        
-        if len(self.signals) >= 2:
-            last_colors = [s.get('result_color') for s in self.signals[-2:] if s.get('result_color')]
-            if last_colors:
-                last_color = last_colors[-1]
-                # Slight tendency to alternate
-                if last_color == 'Green':
-                    weights = [0.45, 0.55]
-                else:
-                    weights = [0.55, 0.45]
-        
+        weights = [0.48, 0.52]
         return np.random.choice(colors, p=weights)
     
     def add_signal(self, signal_data):
@@ -185,20 +157,8 @@ class SignalProcessor:
             
             global latest_signals
             latest_signals.append(signal_data)
-            
-            print(f"✅ [{self.bot_name}] NEW SIGNAL: {signal_data['period_id']}")
             return True
         return False
-    
-    def load_existing_data(self):
-        """Load existing data from file (simplified for Render)"""
-        try:
-            # For Render free tier, we'll use in-memory storage only
-            # R2 storage requires paid plans for persistent storage
-            self.signals = []
-            print(f"ℹ️ [{self.bot_name}] Using in-memory storage (Render Free Tier)")
-        except Exception as e:
-            print(f"ℹ️ [{self.bot_name}] No existing data: {e}")
 
 # Initialize bots
 def initialize_bots():
@@ -209,7 +169,7 @@ def initialize_bots():
 
 initialize_bots()
 
-# Streamlit Dashboard
+# Streamlit App
 st.set_page_config(
     page_title="Coinryze Pro Analyzer",
     page_icon="🎯",
@@ -217,7 +177,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Mobile-Optimized CSS
+# CSS Styles
 st.markdown("""
 <style>
     .main-header {
@@ -271,9 +231,9 @@ st.markdown("""
         color: white;
         margin: 4px 0;
     }
-    .prediction-high { background: #00b09b; color: white; padding: 4px 8px; border-radius: 12px; }
-    .prediction-medium { background: #ff9a00; color: white; padding: 4px 8px; border-radius: 12px; }
-    .prediction-low { background: #ff416c; color: white; padding: 4px 8px; border-radius: 12px; }
+    .prediction-high { background: #00b09b; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8em; }
+    .prediction-medium { background: #ff9a00; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8em; }
+    .prediction-low { background: #ff416c; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8em; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -292,6 +252,13 @@ def create_bot_dashboard(bot_name, processor):
         with col3:
             losses = len([s for s in signals if s.get('result') == 'Lose'])
             st.metric("❌ Losses", losses)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("🔄 Phase", processor.current_phase)
+        with col2:
+            current_multiplier = processor.recommended_multipliers[processor.current_phase - 1] if processor.current_phase <= len(processor.recommended_multipliers) else 1.0
+            st.metric("💰 Multiplier", f"x{current_multiplier}")
         
         st.subheader("📋 Recent Signals")
         for signal in reversed(signals[-5:]):
@@ -332,7 +299,7 @@ def create_bot_dashboard(bot_name, processor):
             
             st.markdown('</div>', unsafe_allow_html=True)
     else:
-        st.info("📡 Waiting for signals... Paste a Telegram signal above!")
+        st.info("📡 Waiting for signals...")
 
 def main():
     st.markdown('<div class="main-header">🎯 COINRYZE PRO ANALYZER</div>', unsafe_allow_html=True)
@@ -379,7 +346,7 @@ Recommended quantity: x1"""
                 else:
                     st.warning("⚠️ Signal already processed")
             else:
-                st.error("❌ Invalid signal format. Check the example.")
+                st.error("❌ Invalid signal format")
         else:
             st.error("❌ Please paste a signal message")
     
@@ -387,6 +354,25 @@ Recommended quantity: x1"""
     st.header("📊 LIVE DASHBOARD")
     for bot_name, processor in bot_monitors.items():
         create_bot_dashboard(bot_name, processor)
+    
+    # Global Stats
+    st.header("🌐 GLOBAL STATISTICS")
+    global_signals = list(latest_signals)
+    if global_signals:
+        col1, col2, col3, col4 = st.columns(4)
+        total_signals = len(global_signals)
+        wins = len([s for s in global_signals if s.get('result') == 'Win'])
+        losses = len([s for s in global_signals if s.get('result') == 'Lose'])
+        
+        with col1:
+            st.metric("📈 Total", total_signals)
+        with col2:
+            st.metric("✅ Wins", wins)
+        with col3:
+            st.metric("❌ Losses", losses)
+        with col4:
+            win_rate = (wins / total_signals * 100) if total_signals > 0 else 0
+            st.metric("🎯 Win Rate", f"{win_rate:.1f}%")
     
     # Auto-refresh
     time.sleep(10)
