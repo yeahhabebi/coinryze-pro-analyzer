@@ -7,7 +7,6 @@ import os
 import json
 import boto3
 from botocore.config import Config
-import requests
 from collections import deque
 
 # =============================================
@@ -21,19 +20,12 @@ R2_BUCKET = os.getenv('R2_BUCKET', 'coinryze-analyzer')
 R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
 R2_ENDPOINT = os.getenv('R2_ENDPOINT')
 
-# Telegram Configuration
-API_ID = os.getenv('API_ID', '11345160')
-API_HASH = os.getenv('API_HASH', '2912d1786520d56f2b0df8be2f0a8616')
-SESSION_STRING = os.getenv('SESSION_STRING', '')
-TARGET_CHAT = os.getenv('TARGET_CHAT', '@ETHGPT60s_bot')
-
 # App Configuration
 APP_NAME = os.getenv('APP_NAME', 'Coinryze Pro Analyzer')
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
 REFRESH_INTERVAL = int(os.getenv('REFRESH_INTERVAL', '10'))
 MAX_SIGNALS_HISTORY = int(os.getenv('MAX_SIGNALS_HISTORY', '100'))
 MAX_SIGNALS_DISPLAY = int(os.getenv('MAX_SIGNALS_DISPLAY', '20'))
-AUTO_FETCH = os.getenv('AUTO_FETCH', 'True').lower() == 'true'
 
 # Bot Configuration
 TELEGRAM_BOT_NAME = os.getenv('TELEGRAM_BOT_NAME', 'ETHGPT60s_bot')
@@ -41,89 +33,6 @@ ANALYSIS_WINDOW = int(os.getenv('ANALYSIS_WINDOW', '5'))
 
 # Betting Configuration
 BET_MULTIPLIERS = [1.0, 2.5, 6.25, 15.63, 39.08, 97.62, 244.05, 610.12]
-
-# =============================================
-# TELEGRAM MOCK SERVICE (Since we can't use pyrogram on Render)
-# =============================================
-
-class TelegramMockService:
-    def __init__(self):
-        self.last_checked = None
-        self.processed_messages = set()
-        
-    def get_latest_signals(self):
-        """Mock function to simulate getting new signals"""
-        # In a real implementation, this would connect to Telegram API
-        # For now, we'll use manual input with auto-refresh
-        
-        # Store current time for next check
-        current_time = datetime.now()
-        if not self.last_checked:
-            self.last_checked = current_time
-            
-        # Return empty list - real implementation would return new messages
-        return []
-    
-    def extract_signal_from_text(self, text):
-        """Extract signal information from text message"""
-        if not text:
-            return None
-            
-        signal_data = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'period_id': None,
-            'result': None,
-            'result_color': None,
-            'trade_color': None,
-            'quantity': 1.0,
-            'source': 'telegram_auto'
-        }
-        
-        try:
-            # Extract period ID
-            period_match = re.search(r'Current period ID:\s*(\d+)', text)
-            if not period_match:
-                period_match = re.search(r'period ID:\s*(\d+)', text)
-            if not period_match:
-                period_match = re.search(r'ID:\s*(\d+)', text)
-            
-            if period_match:
-                signal_data['period_id'] = period_match.group(1)
-            else:
-                return None
-            
-            # Extract result
-            if 'Result:Win' in text or 'Win🎉' in text:
-                signal_data['result'] = 'Win'
-                signal_data['result_color'] = random.choice(['Green', 'Red'])
-            elif 'Result:Lose' in text or 'Lose💔' in text:
-                signal_data['result'] = 'Lose'
-                signal_data['result_color'] = random.choice(['Green', 'Red'])
-            else:
-                return None
-            
-            # Extract trade color
-            if '🟢' in text or 'Trade: 🟢' in text:
-                signal_data['trade_color'] = 'Green'
-            elif '🔴' in text or 'Trade: 🔴' in text:
-                signal_data['trade_color'] = 'Red'
-            else:
-                return None
-            
-            # Extract quantity
-            qty_match = re.search(r'quantity:\s*x?([\d.]+)', text, re.IGNORECASE)
-            if qty_match:
-                try:
-                    signal_data['quantity'] = float(qty_match.group(1))
-                except:
-                    signal_data['quantity'] = 1.0
-            
-            return signal_data
-            
-        except Exception as e:
-            if DEBUG_MODE:
-                st.error(f"❌ Telegram parse error: {e}")
-            return None
 
 # =============================================
 # R2 STORAGE FUNCTIONS
@@ -185,12 +94,6 @@ if 'latest_signals' not in st.session_state:
 
 if 'bot_monitors' not in st.session_state:
     st.session_state.bot_monitors = {}
-
-if 'telegram_service' not in st.session_state:
-    st.session_state.telegram_service = TelegramMockService()
-
-if 'last_auto_check' not in st.session_state:
-    st.session_state.last_auto_check = None
 
 if 'manual_signals_queue' not in st.session_state:
     st.session_state.manual_signals_queue = deque()
@@ -287,24 +190,26 @@ class SignalProcessor:
                 'source': 'manual'
             }
             
-            # Extract period ID
+            # Extract period ID - MULTIPLE PATTERNS for your format
             period_match = re.search(r'Current period ID:\s*(\d+)', message)
+            if not period_match:
+                period_match = re.search(r'📌Current period ID:\s*(\d+)', message)
             if not period_match:
                 period_match = re.search(r'period ID:\s*(\d+)', message)
             if not period_match:
-                period_match = re.search(r'ID:\s*(\d+)', message)
+                period_match = re.search(r'📌period ID:\s*(\d+)', message)
             
             if period_match:
                 signal_data['period_id'] = period_match.group(1)
             else:
                 return None
             
-            # Extract result
-            if 'Result:Win' in message or 'Win🎉' in message:
+            # Extract result - FIXED for your format
+            if 'Result:Win' in message or 'Win🎉' in message or '🔔Result:Win🎉' in message:
                 signal_data['result'] = 'Win'
                 signal_data['result_color'] = random.choice(['Green', 'Red'])
                 self.current_phase = 1
-            elif 'Result:Lose' in message or 'Lose💔' in message:
+            elif 'Result:Lose' in message or 'Lose💔' in message or '🔔Result:Lose💔' in message:
                 signal_data['result'] = 'Lose'
                 signal_data['result_color'] = random.choice(['Green', 'Red'])
                 if self.current_phase < len(self.multipliers):
@@ -312,16 +217,19 @@ class SignalProcessor:
             else:
                 return None
             
-            # Extract trade color
-            if '🟢' in message or 'Trade: 🟢' in message:
+            # Extract trade color - FIXED for your format
+            if '🟢✔️' in message or 'Trade: 🟢' in message or '📲Trade: 🟢✔️' in message:
                 signal_data['trade_color'] = 'Green'
-            elif '🔴' in message or 'Trade: 🔴' in message:
+            elif '🔴✔️' in message or 'Trade: 🔴' in message or '📲Trade: 🔴✔️' in message:
                 signal_data['trade_color'] = 'Red'
             else:
                 return None
             
-            # Extract quantity
+            # Extract quantity - FIXED for your format
             qty_match = re.search(r'quantity:\s*x?([\d.]+)', message, re.IGNORECASE)
+            if not qty_match:
+                qty_match = re.search(r'Recommended quantity:\s*x?([\d.]+)', message, re.IGNORECASE)
+            
             if qty_match:
                 try:
                     signal_data['quantity'] = float(qty_match.group(1))
@@ -386,7 +294,6 @@ def process_queued_signals():
         if signal:
             if processor.add_signal(signal):
                 processed_count += 1
-                st.success(f"✅ Auto-processed: {signal['period_id']}")
     return processed_count
 
 def add_to_manual_queue(signal_text):
@@ -515,7 +422,6 @@ def display_environment_info():
         st.write(f"**Version:** {os.getenv('APP_VERSION', '2.0.0')}")
         st.write(f"**Bot:** {TELEGRAM_BOT_NAME}")
         st.write(f"**Refresh:** {REFRESH_INTERVAL}s")
-        st.write(f"**Auto Mode:** {'✅ ON' if AUTO_FETCH else '❌ OFF'}")
         
         # Queue status
         queue_size = len(st.session_state.manual_signals_queue)
@@ -548,7 +454,7 @@ def display_dashboard():
     # Get current signals from session state
     signals = processor.signals
     
-    st.markdown(f'<div class="bot-card"><h3>🤖 {TELEGRAM_BOT_NAME} <span class="auto-badge">AUTO-REFRESH</span></h3></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="bot-card"><h3>🤖 {TELEGRAM_BOT_NAME} <span class="auto-badge">AUTO-PROCESS</span></h3></div>', unsafe_allow_html=True)
     
     if signals:
         # Statistics Row
@@ -582,7 +488,7 @@ def display_dashboard():
             display_signal_card(signal)
             
     else:
-        st.info("📡 No signals yet. Add signals below to see the dashboard!")
+        st.info("📡 No signals yet. Paste signals below to see the dashboard!")
 
 def display_signal_card(signal):
     """Display individual signal card"""
@@ -597,8 +503,6 @@ def display_signal_card(signal):
         st.write(f"**Period:** {signal['period_id']}")
         st.write(f"**Time:** `{signal['timestamp'].split(' ')[1]}`")
         st.write(f"**Result:** {'✅ WIN' if result == 'Win' else '❌ LOSE'}")
-        if signal.get('source') == 'manual':
-            st.write("**Source:** 📱 Manual")
         
     with col2:
         if signal.get('trade_color'):
@@ -637,13 +541,13 @@ def main():
     # Workflow info
     st.markdown(f"""
     <div class="mobile-workflow">
-    <h3>🤖 AUTOMATIC WORKFLOW</h3>
+    <h3>🤖 EXACT TELEGRAM FORMAT SUPPORT</h3>
     <ol>
-    <li><strong>PASTE</strong> multiple signals below</li>
-    <li><strong>WATCH</strong> as they auto-process</li>
-    <li><strong>ANALYZE</strong> patterns in real-time</li>
+    <li><strong>COPY</strong> multiple signals directly from Telegram</li>
+    <li><strong>PASTE</strong> exactly as they appear</li>
+    <li><strong>WATCH</strong> auto-processing of all signals</li>
     </ol>
-    <p><strong>⚡ Auto-refreshes every {REFRESH_INTERVAL} seconds</strong></p>
+    <p><strong>⚡ Supports your exact signal format</strong></p>
     <p><strong>☁️ Data saved to Cloudflare R2</strong></p>
     </div>
     """, unsafe_allow_html=True)
@@ -662,38 +566,32 @@ def main():
     
     # Signal Input Section
     st.header("🚀 BULK SIGNAL INPUT")
-    st.markdown('<div class="quick-input"><h4>📋 Paste MULTIPLE Signals Below (One per line)</h4></div>', unsafe_allow_html=True)
+    st.markdown('<div class="quick-input"><h4>📋 Paste EXACT Telegram Signals Below</h4></div>', unsafe_allow_html=True)
     
     telegram_input = st.text_area(
-        "Paste multiple signals (one signal per empty line):",
-        height=200,
+        "Paste signals exactly as they appear in Telegram:",
+        height=300,
         key="signal_input",
-        placeholder=f"""Paste MULTIPLE signals here - separate with empty lines:
+        placeholder="""Paste your EXACT Telegram signals here:
 
+ETHGPT60s_1#:
 ⏰Transaction type: ETH 1 minutes⏰
-📌Current period ID: 202510210929
+
+🚥Transaction Tips🚥
+
+📌Current period ID: 202510211143
+
 🔔Result:Win🎉
-📌period ID: 202510210930
+——————————————————
+🔜Next issue
+
+📌period ID: 202510211144
+
 📲Trade: 🔴✔️
+
 Recommended quantity: x1
 
-[EMPTY LINE]
-
-⏰Transaction type: ETH 1 minutes⏰
-📌Current period ID: 202510210930
-🔔Result:Lose💔
-📌period ID: 202510210931
-📲Trade: 🟢✔️
-Recommended quantity: x2.5
-
-[EMPTY LINE]
-
-⏰Transaction type: ETH 1 minutes⏰
-📌Current period ID: 202510210931
-🔔Result:Win🎉
-📌period ID: 202510210932
-📲Trade: 🔴✔️
-Recommended quantity: x1"""
+[More signals...]"""
     )
     
     # Process button
@@ -701,13 +599,22 @@ Recommended quantity: x1"""
     with col1:
         if st.button("🚀 PROCESS ALL SIGNALS", key="process_btn", use_container_width=True):
             if telegram_input.strip():
-                # Split by empty lines to get individual signals
-                signal_blocks = re.split(r'\n\s*\n', telegram_input.strip())
+                # Split by empty lines or specific patterns to get individual signals
+                signal_blocks = re.split(r'\n\s*\n\s*[⏰ETHGPT]', telegram_input.strip())
                 processed_count = 0
+                
+                # If splitting didn't work well, try another method
+                if len(signal_blocks) <= 1:
+                    signal_blocks = re.split(r'(?=⏰Transaction type:)', telegram_input.strip())
+                    signal_blocks = [s for s in signal_blocks if s.strip()]
                 
                 with st.spinner(f"🔄 Processing {len(signal_blocks)} signals..."):
                     for signal_block in signal_blocks:
                         if signal_block.strip():
+                            # Ensure the block starts with transaction type
+                            if not signal_block.strip().startswith('⏰'):
+                                signal_block = '⏰Transaction type: ETH 1 minutes⏰\n\n' + signal_block
+                            
                             signal = processor.parse_signal(signal_block)
                             if signal:
                                 if processor.add_signal(signal):
@@ -727,9 +634,15 @@ Recommended quantity: x1"""
         if st.button("🔄 Auto-Process", key="auto_btn"):
             # Add to queue for auto-processing
             if telegram_input.strip():
-                signal_blocks = re.split(r'\n\s*\n', telegram_input.strip())
+                signal_blocks = re.split(r'\n\s*\n\s*[⏰ETHGPT]', telegram_input.strip())
+                if len(signal_blocks) <= 1:
+                    signal_blocks = re.split(r'(?=⏰Transaction type:)', telegram_input.strip())
+                    signal_blocks = [s for s in signal_blocks if s.strip()]
+                
                 for signal_block in signal_blocks:
                     if signal_block.strip():
+                        if not signal_block.strip().startswith('⏰'):
+                            signal_block = '⏰Transaction type: ETH 1 minutes⏰\n\n' + signal_block
                         add_to_manual_queue(signal_block)
                 st.success(f"✅ Added {len(signal_blocks)} signals to auto-processing queue!")
                 time.sleep(1)
