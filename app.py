@@ -23,7 +23,7 @@ R2_ENDPOINT = os.getenv('R2_ENDPOINT')
 # App Configuration
 APP_NAME = os.getenv('APP_NAME', 'Coinryze Pro Analyzer')
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
-REFRESH_INTERVAL = int(os.getenv('REFRESH_INTERVAL', '10'))
+REFRESH_INTERVAL = int(os.getenv('REFRESH_INTERVAL', '30'))  # Increased for stability
 MAX_SIGNALS_HISTORY = int(os.getenv('MAX_SIGNALS_HISTORY', '100'))
 MAX_SIGNALS_DISPLAY = int(os.getenv('MAX_SIGNALS_DISPLAY', '20'))
 
@@ -49,9 +49,7 @@ def get_r2_client():
                 aws_secret_access_key=R2_SECRET_ACCESS_KEY,
                 config=Config(signature_version='s3v4')
             )
-        except Exception as e:
-            if DEBUG_MODE:
-                st.error(f"❌ R2 Client Error: {e}")
+        except Exception:
             return None
     return None
 
@@ -67,10 +65,8 @@ def save_to_r2(data, key):
                 ContentType='application/json'
             )
             return True
-    except Exception as e:
-        if DEBUG_MODE:
-            st.error(f"❌ R2 Save Error: {e}")
-    return False
+    except Exception:
+        return False
 
 def load_from_r2(key):
     """Load data from R2 storage"""
@@ -89,14 +85,12 @@ def load_from_r2(key):
 # =============================================
 
 # Initialize session state for data persistence
-if 'latest_signals' not in st.session_state:
+if 'app_initialized' not in st.session_state:
+    st.session_state.app_initialized = True
     st.session_state.latest_signals = []
-
-if 'bot_monitors' not in st.session_state:
     st.session_state.bot_monitors = {}
-
-if 'manual_signals_queue' not in st.session_state:
     st.session_state.manual_signals_queue = deque()
+    st.session_state.last_processed = None
 
 class LightweightPredictor:
     def __init__(self):
@@ -190,7 +184,7 @@ class SignalProcessor:
                 'source': 'manual'
             }
             
-            # Extract period ID - MULTIPLE PATTERNS for your format
+            # Extract period ID
             period_match = re.search(r'Current period ID:\s*(\d+)', message)
             if not period_match:
                 period_match = re.search(r'📌Current period ID:\s*(\d+)', message)
@@ -204,7 +198,7 @@ class SignalProcessor:
             else:
                 return None
             
-            # Extract result - FIXED for your format
+            # Extract result
             if 'Result:Win' in message or 'Win🎉' in message or '🔔Result:Win🎉' in message:
                 signal_data['result'] = 'Win'
                 signal_data['result_color'] = random.choice(['Green', 'Red'])
@@ -217,7 +211,7 @@ class SignalProcessor:
             else:
                 return None
             
-            # Extract trade color - FIXED for your format
+            # Extract trade color
             if '🟢✔️' in message or 'Trade: 🟢' in message or '📲Trade: 🟢✔️' in message:
                 signal_data['trade_color'] = 'Green'
             elif '🔴✔️' in message or 'Trade: 🔴' in message or '📲Trade: 🔴✔️' in message:
@@ -225,7 +219,7 @@ class SignalProcessor:
             else:
                 return None
             
-            # Extract quantity - FIXED for your format
+            # Extract quantity
             qty_match = re.search(r'quantity:\s*x?([\d.]+)', message, re.IGNORECASE)
             if not qty_match:
                 qty_match = re.search(r'Recommended quantity:\s*x?([\d.]+)', message, re.IGNORECASE)
@@ -243,9 +237,7 @@ class SignalProcessor:
             
             return signal_data
             
-        except Exception as e:
-            if DEBUG_MODE:
-                st.error(f"❌ Parse error: {str(e)}")
+        except Exception:
             return None
     
     def add_signal(self, signal_data):
@@ -299,6 +291,25 @@ def process_queued_signals():
 def add_to_manual_queue(signal_text):
     """Add signal to manual processing queue"""
     st.session_state.manual_signals_queue.append(signal_text)
+
+def extract_individual_signals(bulk_text):
+    """Extract individual signals from bulk text"""
+    signals = []
+    
+    # Method 1: Split by transaction type
+    signal_blocks = re.split(r'(?=⏰Transaction type:)', bulk_text)
+    signal_blocks = [block.strip() for block in signal_blocks if block.strip()]
+    
+    # Method 2: If first method doesn't work well, try alternative
+    if len(signal_blocks) <= 1:
+        signal_blocks = re.split(r'\n\s*\n\s*[⏰ETHGPT]', bulk_text)
+        signal_blocks = [block.strip() for block in signal_blocks if block.strip()]
+    
+    for block in signal_blocks:
+        if block and 'Current period ID:' in block:
+            signals.append(block)
+    
+    return signals
 
 # =============================================
 # STREAMLIT APP
@@ -432,19 +443,18 @@ def display_environment_info():
         r2_status = "✅ Connected" if R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY else "❌ Not Configured"
         st.write(f"**Cloudflare R2:** {r2_status}")
         
-        if st.button("🔄 Process Queue Now"):
+        if st.button("🔄 Process Queue"):
             processed = process_queued_signals()
             if processed > 0:
                 st.success(f"✅ Processed {processed} signals!")
             st.rerun()
         
-        if st.button("🗑️ Clear All Data"):
+        if st.button("🗑️ Clear Data"):
             processor.signals.clear()
             st.session_state.latest_signals.clear()
             st.session_state.manual_signals_queue.clear()
             processor.save_data()
             st.success("✅ All data cleared!")
-            time.sleep(2)
             st.rerun()
 
 def display_dashboard():
@@ -454,7 +464,7 @@ def display_dashboard():
     # Get current signals from session state
     signals = processor.signals
     
-    st.markdown(f'<div class="bot-card"><h3>🤖 {TELEGRAM_BOT_NAME} <span class="auto-badge">AUTO-PROCESS</span></h3></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="bot-card"><h3>🤖 {TELEGRAM_BOT_NAME} <span class="auto-badge">STABLE</span></h3></div>', unsafe_allow_html=True)
     
     if signals:
         # Statistics Row
@@ -479,16 +489,16 @@ def display_dashboard():
             st.metric("Current Phase", processor.current_phase)
         with col2:
             current_multiplier = processor.multipliers[processor.current_phase - 1] if processor.current_phase <= len(processor.multipliers) else 1.0
-            st.metric("Next Bet Multiplier", f"x{current_multiplier}")
+            st.metric("Next Bet", f"x{current_multiplier}")
         
         # Recent Signals
-        st.subheader(f"📋 Recent Signals (Last {MAX_SIGNALS_DISPLAY})")
+        st.subheader(f"📋 Recent Signals")
         display_signals = signals[-MAX_SIGNALS_DISPLAY:]
         for signal in reversed(display_signals):
             display_signal_card(signal)
             
     else:
-        st.info("📡 No signals yet. Paste signals below to see the dashboard!")
+        st.info("📡 No signals yet. Paste signals below!")
 
 def display_signal_card(signal):
     """Display individual signal card"""
@@ -507,14 +517,14 @@ def display_signal_card(signal):
     with col2:
         if signal.get('trade_color'):
             trade_emoji = "🟢" if signal['trade_color'] == 'Green' else "🔴"
-            st.write(f"**Trade Signal:** {trade_emoji} {signal['trade_color']}")
+            st.write(f"**Trade:** {trade_emoji} {signal['trade_color']}")
         
         if signal.get('result_color'):
             color_emoji = "🟢" if signal['result_color'] == 'Green' else "🔴"
-            st.write(f"**Actual Result:** {color_emoji} {signal['result_color']}")
+            st.write(f"**Result:** {color_emoji} {signal['result_color']}")
         
         st.write(f"**Phase:** {signal.get('phase', 1)}")
-        st.write(f"**Bet Amount:** x{signal.get('quantity', 1.0)}")
+        st.write(f"**Bet:** x{signal.get('quantity', 1.0)}")
         
         # Prediction
         if signal.get('prediction'):
@@ -526,7 +536,7 @@ def display_signal_card(signal):
             pred_emoji = "🟢" if pred_color == 'Green' else "🔴" if pred_color == 'Red' else "⚫"
             confidence_class = f"prediction-{confidence.lower()}"
             
-            st.write(f"**AI Prediction:** {pred_emoji} {pred_color}")
+            st.write(f"**Next:** {pred_emoji} {pred_color}")
             st.markdown(f'<div class="{confidence_class}">Confidence: {confidence} ({probability*100:.1f}%)</div>', unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
@@ -541,13 +551,13 @@ def main():
     # Workflow info
     st.markdown(f"""
     <div class="mobile-workflow">
-    <h3>🤖 EXACT TELEGRAM FORMAT SUPPORT</h3>
+    <h3>🚀 STABLE BULK PROCESSING</h3>
     <ol>
-    <li><strong>COPY</strong> multiple signals directly from Telegram</li>
+    <li><strong>COPY</strong> multiple signals from Telegram</li>
     <li><strong>PASTE</strong> exactly as they appear</li>
-    <li><strong>WATCH</strong> auto-processing of all signals</li>
+    <li><strong>PROCESS</strong> all at once automatically</li>
     </ol>
-    <p><strong>⚡ Supports your exact signal format</strong></p>
+    <p><strong>⚡ Optimized for Render Free Tier</strong></p>
     <p><strong>☁️ Data saved to Cloudflare R2</strong></p>
     </div>
     """, unsafe_allow_html=True)
@@ -555,105 +565,80 @@ def main():
     # Process any queued signals first
     queue_size = len(st.session_state.manual_signals_queue)
     if queue_size > 0:
-        st.info(f"🔄 Processing {queue_size} signals in queue...")
-        processed = process_queued_signals()
-        if processed > 0:
-            st.success(f"✅ Auto-processed {processed} signals!")
-            time.sleep(1)
-            st.rerun()
+        with st.spinner(f"🔄 Processing {queue_size} queued signals..."):
+            processed = process_queued_signals()
+            if processed > 0:
+                st.success(f"✅ Processed {processed} signals!")
+                time.sleep(2)
+                st.rerun()
     
-    st.markdown(f'<div class="refresh-banner">🔄 LIVE DASHBOARD - Auto-refreshes every {REFRESH_INTERVAL} seconds</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="refresh-banner">🔄 Auto-refresh: {REFRESH_INTERVAL} seconds</div>', unsafe_allow_html=True)
     
     # Signal Input Section
-    st.header("🚀 BULK SIGNAL INPUT")
-    st.markdown('<div class="quick-input"><h4>📋 Paste EXACT Telegram Signals Below</h4></div>', unsafe_allow_html=True)
+    st.header("📥 BULK SIGNAL INPUT")
+    st.markdown('<div class="quick-input"><h4>Paste EXACT Telegram Signals Below</h4></div>', unsafe_allow_html=True)
     
     telegram_input = st.text_area(
-        "Paste signals exactly as they appear in Telegram:",
+        "Paste signals:",
         height=300,
         key="signal_input",
         placeholder="""Paste your EXACT Telegram signals here:
 
 ETHGPT60s_1#:
 ⏰Transaction type: ETH 1 minutes⏰
-
-🚥Transaction Tips🚥
-
 📌Current period ID: 202510211143
-
 🔔Result:Win🎉
-——————————————————
-🔜Next issue
-
 📌period ID: 202510211144
-
 📲Trade: 🔴✔️
-
 Recommended quantity: x1
 
 [More signals...]"""
     )
     
-    # Process button
-    col1, col2 = st.columns([3, 1])
+    # Process buttons
+    col1, col2 = st.columns(2)
+    
     with col1:
         if st.button("🚀 PROCESS ALL SIGNALS", key="process_btn", use_container_width=True):
             if telegram_input.strip():
-                # Split by empty lines or specific patterns to get individual signals
-                signal_blocks = re.split(r'\n\s*\n\s*[⏰ETHGPT]', telegram_input.strip())
-                processed_count = 0
-                
-                # If splitting didn't work well, try another method
-                if len(signal_blocks) <= 1:
-                    signal_blocks = re.split(r'(?=⏰Transaction type:)', telegram_input.strip())
-                    signal_blocks = [s for s in signal_blocks if s.strip()]
-                
-                with st.spinner(f"🔄 Processing {len(signal_blocks)} signals..."):
-                    for signal_block in signal_blocks:
-                        if signal_block.strip():
-                            # Ensure the block starts with transaction type
-                            if not signal_block.strip().startswith('⏰'):
-                                signal_block = '⏰Transaction type: ETH 1 minutes⏰\n\n' + signal_block
-                            
-                            signal = processor.parse_signal(signal_block)
-                            if signal:
-                                if processor.add_signal(signal):
-                                    processed_count += 1
-                
-                if processed_count > 0:
-                    st.balloons()
-                    st.success(f"🎉 Successfully processed {processed_count} signals! Dashboard updated.")
-                    time.sleep(2)
-                    st.rerun()
-                else:
-                    st.error("❌ No valid signals found. Please check the format.")
+                with st.spinner("🔄 Extracting and processing signals..."):
+                    # Extract individual signals
+                    signals = extract_individual_signals(telegram_input)
+                    processed_count = 0
+                    
+                    st.info(f"📋 Found {len(signals)} potential signals")
+                    
+                    for signal_text in signals:
+                        signal = processor.parse_signal(signal_text)
+                        if signal:
+                            if processor.add_signal(signal):
+                                processed_count += 1
+                    
+                    if processed_count > 0:
+                        st.balloons()
+                        st.success(f"🎉 Successfully processed {processed_count} signals!")
+                        time.sleep(3)
+                        st.rerun()
+                    else:
+                        st.error("❌ No valid signals found. Check the format.")
             else:
                 st.error("❌ Please paste some signals")
     
     with col2:
-        if st.button("🔄 Auto-Process", key="auto_btn"):
-            # Add to queue for auto-processing
+        if st.button("📋 ADD TO QUEUE", key="queue_btn", use_container_width=True):
             if telegram_input.strip():
-                signal_blocks = re.split(r'\n\s*\n\s*[⏰ETHGPT]', telegram_input.strip())
-                if len(signal_blocks) <= 1:
-                    signal_blocks = re.split(r'(?=⏰Transaction type:)', telegram_input.strip())
-                    signal_blocks = [s for s in signal_blocks if s.strip()]
-                
-                for signal_block in signal_blocks:
-                    if signal_block.strip():
-                        if not signal_block.strip().startswith('⏰'):
-                            signal_block = '⏰Transaction type: ETH 1 minutes⏰\n\n' + signal_block
-                        add_to_manual_queue(signal_block)
-                st.success(f"✅ Added {len(signal_blocks)} signals to auto-processing queue!")
-                time.sleep(1)
+                signals = extract_individual_signals(telegram_input)
+                for signal_text in signals:
+                    add_to_manual_queue(signal_text)
+                st.success(f"✅ Added {len(signals)} signals to queue!")
                 st.rerun()
     
     # Dashboard
     display_dashboard()
     
-    # Auto-refresh and process queue
-    time.sleep(REFRESH_INTERVAL)
-    st.rerun()
+    # Manual refresh button instead of auto-refresh
+    if st.button("🔄 MANUAL REFRESH", use_container_width=True):
+        st.rerun()
 
 if __name__ == "__main__":
     main()
