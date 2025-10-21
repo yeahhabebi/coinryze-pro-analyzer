@@ -7,6 +7,8 @@ import os
 import json
 import boto3
 from botocore.config import Config
+import requests
+from collections import deque
 
 # =============================================
 # ENVIRONMENT VARIABLES CONFIGURATION
@@ -19,12 +21,19 @@ R2_BUCKET = os.getenv('R2_BUCKET', 'coinryze-analyzer')
 R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
 R2_ENDPOINT = os.getenv('R2_ENDPOINT')
 
+# Telegram Configuration
+API_ID = os.getenv('API_ID', '11345160')
+API_HASH = os.getenv('API_HASH', '2912d1786520d56f2b0df8be2f0a8616')
+SESSION_STRING = os.getenv('SESSION_STRING', '')
+TARGET_CHAT = os.getenv('TARGET_CHAT', '@ETHGPT60s_bot')
+
 # App Configuration
 APP_NAME = os.getenv('APP_NAME', 'Coinryze Pro Analyzer')
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
 REFRESH_INTERVAL = int(os.getenv('REFRESH_INTERVAL', '10'))
 MAX_SIGNALS_HISTORY = int(os.getenv('MAX_SIGNALS_HISTORY', '100'))
 MAX_SIGNALS_DISPLAY = int(os.getenv('MAX_SIGNALS_DISPLAY', '20'))
+AUTO_FETCH = os.getenv('AUTO_FETCH', 'True').lower() == 'true'
 
 # Bot Configuration
 TELEGRAM_BOT_NAME = os.getenv('TELEGRAM_BOT_NAME', 'ETHGPT60s_bot')
@@ -32,6 +41,89 @@ ANALYSIS_WINDOW = int(os.getenv('ANALYSIS_WINDOW', '5'))
 
 # Betting Configuration
 BET_MULTIPLIERS = [1.0, 2.5, 6.25, 15.63, 39.08, 97.62, 244.05, 610.12]
+
+# =============================================
+# TELEGRAM MOCK SERVICE (Since we can't use pyrogram on Render)
+# =============================================
+
+class TelegramMockService:
+    def __init__(self):
+        self.last_checked = None
+        self.processed_messages = set()
+        
+    def get_latest_signals(self):
+        """Mock function to simulate getting new signals"""
+        # In a real implementation, this would connect to Telegram API
+        # For now, we'll use manual input with auto-refresh
+        
+        # Store current time for next check
+        current_time = datetime.now()
+        if not self.last_checked:
+            self.last_checked = current_time
+            
+        # Return empty list - real implementation would return new messages
+        return []
+    
+    def extract_signal_from_text(self, text):
+        """Extract signal information from text message"""
+        if not text:
+            return None
+            
+        signal_data = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'period_id': None,
+            'result': None,
+            'result_color': None,
+            'trade_color': None,
+            'quantity': 1.0,
+            'source': 'telegram_auto'
+        }
+        
+        try:
+            # Extract period ID
+            period_match = re.search(r'Current period ID:\s*(\d+)', text)
+            if not period_match:
+                period_match = re.search(r'period ID:\s*(\d+)', text)
+            if not period_match:
+                period_match = re.search(r'ID:\s*(\d+)', text)
+            
+            if period_match:
+                signal_data['period_id'] = period_match.group(1)
+            else:
+                return None
+            
+            # Extract result
+            if 'Result:Win' in text or 'Win🎉' in text:
+                signal_data['result'] = 'Win'
+                signal_data['result_color'] = random.choice(['Green', 'Red'])
+            elif 'Result:Lose' in text or 'Lose💔' in text:
+                signal_data['result'] = 'Lose'
+                signal_data['result_color'] = random.choice(['Green', 'Red'])
+            else:
+                return None
+            
+            # Extract trade color
+            if '🟢' in text or 'Trade: 🟢' in text:
+                signal_data['trade_color'] = 'Green'
+            elif '🔴' in text or 'Trade: 🔴' in text:
+                signal_data['trade_color'] = 'Red'
+            else:
+                return None
+            
+            # Extract quantity
+            qty_match = re.search(r'quantity:\s*x?([\d.]+)', text, re.IGNORECASE)
+            if qty_match:
+                try:
+                    signal_data['quantity'] = float(qty_match.group(1))
+                except:
+                    signal_data['quantity'] = 1.0
+            
+            return signal_data
+            
+        except Exception as e:
+            if DEBUG_MODE:
+                st.error(f"❌ Telegram parse error: {e}")
+            return None
 
 # =============================================
 # R2 STORAGE FUNCTIONS
@@ -65,8 +157,6 @@ def save_to_r2(data, key):
                 Body=json.dumps(data, default=str),
                 ContentType='application/json'
             )
-            if DEBUG_MODE:
-                st.success(f"✅ Saved to R2: {key}")
             return True
     except Exception as e:
         if DEBUG_MODE:
@@ -80,12 +170,9 @@ def load_from_r2(key):
         if s3_client:
             response = s3_client.get_object(Bucket=R2_BUCKET, Key=key)
             data = json.loads(response['Body'].read())
-            if DEBUG_MODE:
-                st.success(f"✅ Loaded from R2: {key}")
             return data
-    except Exception as e:
-        if DEBUG_MODE:
-            st.info(f"ℹ️ No existing data in R2: {key}")
+    except Exception:
+        pass
     return None
 
 # =============================================
@@ -98,6 +185,15 @@ if 'latest_signals' not in st.session_state:
 
 if 'bot_monitors' not in st.session_state:
     st.session_state.bot_monitors = {}
+
+if 'telegram_service' not in st.session_state:
+    st.session_state.telegram_service = TelegramMockService()
+
+if 'last_auto_check' not in st.session_state:
+    st.session_state.last_auto_check = None
+
+if 'manual_signals_queue' not in st.session_state:
+    st.session_state.manual_signals_queue = deque()
 
 class LightweightPredictor:
     def __init__(self):
@@ -160,11 +256,8 @@ class SignalProcessor:
                 self.last_period_id = data.get('last_period_id')
                 if self.signals:
                     self.last_period_id = self.signals[-1]['period_id']
-                if DEBUG_MODE:
-                    st.success(f"✅ Loaded {len(self.signals)} signals for {self.bot_name}")
-        except Exception as e:
-            if DEBUG_MODE:
-                st.info(f"ℹ️ No existing data for {self.bot_name}")
+        except Exception:
+            pass
     
     def save_data(self):
         """Save data to R2 storage"""
@@ -180,8 +273,6 @@ class SignalProcessor:
     def parse_signal(self, message):
         try:
             if not message:
-                if DEBUG_MODE:
-                    st.error("❌ No message provided")
                 return None
             
             signal_data = {
@@ -192,7 +283,8 @@ class SignalProcessor:
                 'trade_color': None,
                 'quantity': 1.0,
                 'phase': self.current_phase,
-                'bot_name': self.bot_name
+                'bot_name': self.bot_name,
+                'source': 'manual'
             }
             
             # Extract period ID
@@ -204,11 +296,7 @@ class SignalProcessor:
             
             if period_match:
                 signal_data['period_id'] = period_match.group(1)
-                if DEBUG_MODE:
-                    st.success(f"✅ Found Period ID: {signal_data['period_id']}")
             else:
-                if DEBUG_MODE:
-                    st.error("❌ Could not find Period ID")
                 return None
             
             # Extract result
@@ -216,32 +304,20 @@ class SignalProcessor:
                 signal_data['result'] = 'Win'
                 signal_data['result_color'] = random.choice(['Green', 'Red'])
                 self.current_phase = 1
-                if DEBUG_MODE:
-                    st.success("✅ Result: Win")
             elif 'Result:Lose' in message or 'Lose💔' in message:
                 signal_data['result'] = 'Lose'
                 signal_data['result_color'] = random.choice(['Green', 'Red'])
                 if self.current_phase < len(self.multipliers):
                     self.current_phase += 1
-                if DEBUG_MODE:
-                    st.warning("⚠️ Result: Lose")
             else:
-                if DEBUG_MODE:
-                    st.error("❌ Could not determine Win/Lose")
                 return None
             
             # Extract trade color
             if '🟢' in message or 'Trade: 🟢' in message:
                 signal_data['trade_color'] = 'Green'
-                if DEBUG_MODE:
-                    st.success("✅ Trade: Green")
             elif '🔴' in message or 'Trade: 🔴' in message:
                 signal_data['trade_color'] = 'Red'
-                if DEBUG_MODE:
-                    st.success("✅ Trade: Red")
             else:
-                if DEBUG_MODE:
-                    st.error("❌ Could not find trade color")
                 return None
             
             # Extract quantity
@@ -249,21 +325,13 @@ class SignalProcessor:
             if qty_match:
                 try:
                     signal_data['quantity'] = float(qty_match.group(1))
-                    if DEBUG_MODE:
-                        st.success(f"✅ Quantity: x{signal_data['quantity']}")
                 except:
                     signal_data['quantity'] = self.multipliers[self.current_phase - 1]
-                    if DEBUG_MODE:
-                        st.info(f"ℹ️ Using default quantity: x{signal_data['quantity']}")
             else:
                 signal_data['quantity'] = self.multipliers[self.current_phase - 1]
-                if DEBUG_MODE:
-                    st.info(f"ℹ️ Using default quantity: x{signal_data['quantity']}")
             
             # Add prediction
             signal_data['prediction'] = self.predictor.predict(self.signals)
-            if DEBUG_MODE:
-                st.success("✅ Prediction generated")
             
             return signal_data
             
@@ -292,10 +360,8 @@ class SignalProcessor:
                 # Save to R2 storage
                 self.save_data()
                 
-                st.success(f"🎯 SUCCESS! Added signal {signal_data['period_id']} (Saved to Cloudflare R2)")
                 return True
             else:
-                st.warning(f"⚠️ Signal {signal_data['period_id']} already processed")
                 return False
         return False
 
@@ -306,6 +372,26 @@ if bot_key not in st.session_state.bot_monitors:
 
 # Get the processor
 processor = st.session_state.bot_monitors[bot_key]
+
+# =============================================
+# AUTO PROCESSING FUNCTIONS
+# =============================================
+
+def process_queued_signals():
+    """Process any signals in the manual queue"""
+    processed_count = 0
+    while st.session_state.manual_signals_queue:
+        signal_text = st.session_state.manual_signals_queue.popleft()
+        signal = processor.parse_signal(signal_text)
+        if signal:
+            if processor.add_signal(signal):
+                processed_count += 1
+                st.success(f"✅ Auto-processed: {signal['period_id']}")
+    return processed_count
+
+def add_to_manual_queue(signal_text):
+    """Add signal to manual processing queue"""
+    st.session_state.manual_signals_queue.append(signal_text)
 
 # =============================================
 # STREAMLIT APP
@@ -403,21 +489,20 @@ st.markdown("""
         color: white;
         text-align: center;
     }
-    .env-badge {
-        background: #6c757d;
+    .auto-badge {
+        background: #00b09b;
         color: white;
         padding: 2px 8px;
         border-radius: 12px;
         font-size: 0.7em;
         margin-left: 5px;
     }
-    .storage-badge {
-        background: #FF6B35;
+    .queue-badge {
+        background: #ff9a00;
         color: white;
         padding: 2px 8px;
         border-radius: 12px;
         font-size: 0.7em;
-        margin-left: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -430,21 +515,29 @@ def display_environment_info():
         st.write(f"**Version:** {os.getenv('APP_VERSION', '2.0.0')}")
         st.write(f"**Bot:** {TELEGRAM_BOT_NAME}")
         st.write(f"**Refresh:** {REFRESH_INTERVAL}s")
-        st.write(f"**Debug:** {DEBUG_MODE}")
-        st.write(f"**History:** {MAX_SIGNALS_HISTORY} signals")
+        st.write(f"**Auto Mode:** {'✅ ON' if AUTO_FETCH else '❌ OFF'}")
+        
+        # Queue status
+        queue_size = len(st.session_state.manual_signals_queue)
+        if queue_size > 0:
+            st.markdown(f'<div class="queue-badge">Queue: {queue_size}</div>', unsafe_allow_html=True)
         
         # Storage status
         r2_status = "✅ Connected" if R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY else "❌ Not Configured"
         st.write(f"**Cloudflare R2:** {r2_status}")
         
-        if st.button("🔄 Force Refresh"):
+        if st.button("🔄 Process Queue Now"):
+            processed = process_queued_signals()
+            if processed > 0:
+                st.success(f"✅ Processed {processed} signals!")
             st.rerun()
         
         if st.button("🗑️ Clear All Data"):
             processor.signals.clear()
             st.session_state.latest_signals.clear()
+            st.session_state.manual_signals_queue.clear()
             processor.save_data()
-            st.success("✅ All data cleared from memory and R2!")
+            st.success("✅ All data cleared!")
             time.sleep(2)
             st.rerun()
 
@@ -455,7 +548,7 @@ def display_dashboard():
     # Get current signals from session state
     signals = processor.signals
     
-    st.markdown(f'<div class="bot-card"><h3>🤖 {TELEGRAM_BOT_NAME} <span class="env-badge">v{os.getenv("APP_VERSION", "2.0.0")}</span> <span class="storage-badge">R2</span></h3></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="bot-card"><h3>🤖 {TELEGRAM_BOT_NAME} <span class="auto-badge">AUTO-REFRESH</span></h3></div>', unsafe_allow_html=True)
     
     if signals:
         # Statistics Row
@@ -489,7 +582,7 @@ def display_dashboard():
             display_signal_card(signal)
             
     else:
-        st.info("📡 No signals yet. Process a signal above to see the dashboard!")
+        st.info("📡 No signals yet. Add signals below to see the dashboard!")
 
 def display_signal_card(signal):
     """Display individual signal card"""
@@ -504,6 +597,8 @@ def display_signal_card(signal):
         st.write(f"**Period:** {signal['period_id']}")
         st.write(f"**Time:** `{signal['timestamp'].split(' ')[1]}`")
         st.write(f"**Result:** {'✅ WIN' if result == 'Win' else '❌ LOSE'}")
+        if signal.get('source') == 'manual':
+            st.write("**Source:** 📱 Manual")
         
     with col2:
         if signal.get('trade_color'):
@@ -542,60 +637,108 @@ def main():
     # Workflow info
     st.markdown(f"""
     <div class="mobile-workflow">
-    <h3>📱 ULTRA FAST WORKFLOW</h3>
+    <h3>🤖 AUTOMATIC WORKFLOW</h3>
     <ol>
-    <li><strong>COPY</strong> signal from @{TELEGRAM_BOT_NAME} Telegram</li>
-    <li><strong>PASTE</strong> in the input below</li>
-    <li><strong>VIEW</strong> AI predictions instantly</li>
+    <li><strong>PASTE</strong> multiple signals below</li>
+    <li><strong>WATCH</strong> as they auto-process</li>
+    <li><strong>ANALYZE</strong> patterns in real-time</li>
     </ol>
-    <p><strong>⚡ Perfect for Samsung Galaxy A9+</strong></p>
+    <p><strong>⚡ Auto-refreshes every {REFRESH_INTERVAL} seconds</strong></p>
     <p><strong>☁️ Data saved to Cloudflare R2</strong></p>
     </div>
     """, unsafe_allow_html=True)
     
+    # Process any queued signals first
+    queue_size = len(st.session_state.manual_signals_queue)
+    if queue_size > 0:
+        st.info(f"🔄 Processing {queue_size} signals in queue...")
+        processed = process_queued_signals()
+        if processed > 0:
+            st.success(f"✅ Auto-processed {processed} signals!")
+            time.sleep(1)
+            st.rerun()
+    
     st.markdown(f'<div class="refresh-banner">🔄 LIVE DASHBOARD - Auto-refreshes every {REFRESH_INTERVAL} seconds</div>', unsafe_allow_html=True)
     
     # Signal Input Section
-    st.header("🚀 SIGNAL INPUT")
-    st.markdown('<div class="quick-input"><h4>📋 Paste Telegram Signal Below</h4></div>', unsafe_allow_html=True)
+    st.header("🚀 BULK SIGNAL INPUT")
+    st.markdown('<div class="quick-input"><h4>📋 Paste MULTIPLE Signals Below (One per line)</h4></div>', unsafe_allow_html=True)
     
     telegram_input = st.text_area(
-        "Paste complete signal message:",
-        height=150,
+        "Paste multiple signals (one signal per empty line):",
+        height=200,
         key="signal_input",
-        placeholder=f"""Paste your signal here exactly as it appears in Telegram...
+        placeholder=f"""Paste MULTIPLE signals here - separate with empty lines:
 
-Example format:
 ⏰Transaction type: ETH 1 minutes⏰
 📌Current period ID: 202510210929
 🔔Result:Win🎉
 📌period ID: 202510210930
 📲Trade: 🔴✔️
+Recommended quantity: x1
+
+[EMPTY LINE]
+
+⏰Transaction type: ETH 1 minutes⏰
+📌Current period ID: 202510210930
+🔔Result:Lose💔
+📌period ID: 202510210931
+📲Trade: 🟢✔️
+Recommended quantity: x2.5
+
+[EMPTY LINE]
+
+⏰Transaction type: ETH 1 minutes⏰
+📌Current period ID: 202510210931
+🔔Result:Win🎉
+📌period ID: 202510210932
+📲Trade: 🔴✔️
 Recommended quantity: x1"""
     )
     
     # Process button
-    if st.button("🚀 PROCESS SIGNAL", key="process_btn", use_container_width=True):
-        if telegram_input.strip():
-            with st.spinner("🔄 Processing signal..."):
-                signal = processor.parse_signal(telegram_input)
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if st.button("🚀 PROCESS ALL SIGNALS", key="process_btn", use_container_width=True):
+            if telegram_input.strip():
+                # Split by empty lines to get individual signals
+                signal_blocks = re.split(r'\n\s*\n', telegram_input.strip())
+                processed_count = 0
                 
-                if signal:
-                    success = processor.add_signal(signal)
-                    if success:
-                        st.balloons()
-                        st.success("🎉 Signal successfully processed! Check the dashboard below.")
-                        time.sleep(2)
-                        st.rerun()
+                with st.spinner(f"🔄 Processing {len(signal_blocks)} signals..."):
+                    for signal_block in signal_blocks:
+                        if signal_block.strip():
+                            signal = processor.parse_signal(signal_block)
+                            if signal:
+                                if processor.add_signal(signal):
+                                    processed_count += 1
+                
+                if processed_count > 0:
+                    st.balloons()
+                    st.success(f"🎉 Successfully processed {processed_count} signals! Dashboard updated.")
+                    time.sleep(2)
+                    st.rerun()
                 else:
-                    st.error("❌ Failed to process signal. Please check the format.")
-        else:
-            st.error("❌ Please paste a signal message")
+                    st.error("❌ No valid signals found. Please check the format.")
+            else:
+                st.error("❌ Please paste some signals")
+    
+    with col2:
+        if st.button("🔄 Auto-Process", key="auto_btn"):
+            # Add to queue for auto-processing
+            if telegram_input.strip():
+                signal_blocks = re.split(r'\n\s*\n', telegram_input.strip())
+                for signal_block in signal_blocks:
+                    if signal_block.strip():
+                        add_to_manual_queue(signal_block)
+                st.success(f"✅ Added {len(signal_blocks)} signals to auto-processing queue!")
+                time.sleep(1)
+                st.rerun()
     
     # Dashboard
     display_dashboard()
     
-    # Auto-refresh
+    # Auto-refresh and process queue
     time.sleep(REFRESH_INTERVAL)
     st.rerun()
 
